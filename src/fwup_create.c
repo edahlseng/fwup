@@ -18,6 +18,7 @@
 #include "cfgfile.h"
 #include "util.h"
 #include "fwfile.h"
+#include "config.h"
 
 #include <stdlib.h>
 #include <stdio.h>
@@ -33,7 +34,7 @@ static int compute_file_metadata(cfg_t *cfg)
     while ((sec = cfg_getnsec(cfg, "file-resource", i++)) != NULL) {
         const char *path = cfg_getstr(sec, "host-path");
         if (!path)
-            ERR_RETURN("host-path must be set for file-report");
+            ERR_RETURN("host-path must be set for file-resource");
 
         FILE *fp = fopen(path, "rb");
         if (!fp)
@@ -70,6 +71,9 @@ static int add_file_resources(cfg_t *cfg, struct archive *a)
 
     while ((sec = cfg_getnsec(cfg, "file-resource", i++)) != NULL) {
         const char *hostpath = cfg_getstr(sec, "host-path");
+        if (!hostpath)
+            ERR_RETURN("specify a host-path");
+
         OK_OR_RETURN(fwfile_add_local_file(a, cfg_title(sec), hostpath));
     }
 
@@ -103,8 +107,9 @@ int fwup_create(const char *configfile, const char *output_firmware, const unsig
     // Parse configuration
     OK_OR_CLEANUP(cfgfile_parse_file(configfile, &cfg));
 
-    // Force the creation date to be set
+    // Automatically add fwup metadata
     cfg_setstr(cfg, "meta-creation-date", get_creation_timestamp());
+    cfg_setstr(cfg, "meta-fwup-version", PACKAGE_VERSION);
 
     // Compute all metadata
     OK_OR_CLEANUP(compute_file_metadata(cfg));

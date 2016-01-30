@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 
 #
 # Test writing a resource to an offset
@@ -6,12 +6,9 @@
 
 . ./common.sh
 
-# 1KB of all ones
-cat /dev/zero | tr '\0' '\377' | dd of=$WORK/1K.bin bs=1K count=1 2>/dev/null
-
 cat >$CONFIG <<EOF
 file-resource subdir/TEST {
-	host-path = "${WORK}/1K.bin"
+        host-path = "${TESTFILE_150K}"
 }
 
 task complete {
@@ -20,9 +17,10 @@ task complete {
 EOF
 
 # Create the firmware file, then "burn it"
-$FWUP -c -f $CONFIG -o $FWFILE
-$FWUP -a -d $IMGFILE -i $FWFILE -t complete
+$FWUP_CREATE -c -f $CONFIG -o $FWFILE
+$FWUP_APPLY -a -d $IMGFILE -i $FWFILE -t complete
 
 # The firmware file is equivalent to the following dd call
-dd if=$WORK/1K.bin seek=1 of=$WORK/check.bin 2>/dev/null
+# (The conv=sync makes sure that the output is a multiple of 512 bytes)
+dd if=$TESTFILE_150K seek=1 of=$WORK/check.bin conv=sync 2>/dev/null
 diff $WORK/check.bin $IMGFILE

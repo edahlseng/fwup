@@ -22,3 +22,12 @@ test-driver
 *.log
 *.trs
 tests/work
+fwup-key.priv
+fwup-key.pub
+*~
+tests/15M.bin
+/config.guess
+/config.sub
+/libtool
+/ltmain.sh
+/m4

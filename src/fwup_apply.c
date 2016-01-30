@@ -21,6 +21,7 @@
 #include <archive.h>
 #include <archive_entry.h>
 #include <confuse.h>
+#include <errno.h>
 #include <string.h>
 #include <stdbool.h>
 #include <stdlib.h>
@@ -98,8 +99,8 @@ struct fwup_data
 {
     struct archive *a;
 
-    FILE *fatfp;
-    off_t fatfp_base_offset;
+    bool using_fat_cache;
+    struct fat_cache fc;
     off_t current_fatfs_block_offset;
 
     struct archive *subarchive;
@@ -110,10 +111,10 @@ static int read_callback(struct fun_context *fctx, const void **buffer, size_t *
 {
     struct fwup_data *p = (struct fwup_data *) fctx->cookie;
 
-    // there is a possibility that `offset` is a 32 bit integer, so we want to cast in an attempt to avoid problems
-    int64_t offset64 = (int64_t)*offset;
+    // off_t could be 32-bits so offset can't be passed directly to archive_read_data_block
+    int64_t offset64 = 0;
     int rc = archive_read_data_block(p->a, buffer, len, &offset64);
-    *offset = (off_t)offset64;
+    *offset = (off_t) offset64;
 
     if (rc == ARCHIVE_EOF) {
         *len = 0;
@@ -126,41 +127,34 @@ static int read_callback(struct fun_context *fctx, const void **buffer, size_t *
         ERR_RETURN(archive_error_string(p->a));
 }
 
-static int fatfs_ptr_callback(struct fun_context *fctx, off_t block_offset, FILE **fatfp, off_t *fatfp_offset)
+static int fatfs_ptr_callback(struct fun_context *fctx, off_t block_offset, struct fat_cache **fc)
 {
     struct fwup_data *p = (struct fwup_data *) fctx->cookie;
 
     // Check if this is the first time or if block offset changed
-    if (!p->fatfp || block_offset != p->current_fatfs_block_offset) {
+    if (!p->using_fat_cache || block_offset != p->current_fatfs_block_offset) {
 
         // If the FATFS is being used, then flush it to disk
-        if (p->fatfp) {
+        if (p->using_fat_cache) {
             fatfs_closefs();
-            fclose(p->fatfp);
-            p->fatfp = NULL;
+            fat_cache_free(&p->fc);
+            p->using_fat_cache = false;
         }
 
         // Handle the case where a negative block offset is used to flush
         // everything to disk, but not perform an operation.
         if (block_offset >= 0) {
+            // TODO: Make cache size configurable
+            if (fat_cache_init(&p->fc, fctx->output_fd, block_offset * 512, 12 * 1024 *1024) < 0)
+                return -1;
+
+            p->using_fat_cache = true;
             p->current_fatfs_block_offset = block_offset;
-
-            // Open the destination
-            int newfd = dup(fctx->output_fd);
-            if (newfd < 0)
-                ERR_RETURN("Can't dup the output file handle");
-            p->fatfp = fdopen(newfd, "r+");
-            if (!p->fatfp)
-                ERR_RETURN("Error fdopen-ing output");
-
-            p->fatfp_base_offset = block_offset * 512;
         }
     }
 
-    if (fatfp)
-        *fatfp = p->fatfp;
-    if (fatfp_offset)
-        *fatfp_offset = p->fatfp_base_offset;
+    if (fc)
+        *fc = &p->fc;
 
     return 0;
 }
@@ -274,7 +268,24 @@ static void fwup_apply_report_final_progress(struct fun_context *fctx)
     }
 }
 
-int fwup_apply(const char *fw_filename, const char *task_prefix, const char *output_filename, enum fwup_apply_progress progress, const unsigned char *public_key)
+/**
+ * @brief Report zero percent progress
+ *
+ * This function's only purpose is to improve the user experience of seeing
+ * 0% progress as soon as fwup is called. See fwup.c.
+ */
+void fwup_apply_zero_progress(enum fwup_apply_progress progress)
+{
+    // Minimally initialize the fun_context so that fwup_apply_report_progress
+    // works.
+    struct fun_context fctx;
+    memset(&fctx, 0, sizeof(fctx));
+    fctx.progress_mode = progress;
+    fctx.last_progress_reported = -1;
+    fwup_apply_report_progress(&fctx, 0);
+}
+
+int fwup_apply(const char *fw_filename, const char *task_prefix, int output_fd, enum fwup_apply_progress progress, const unsigned char *public_key)
 {
     int rc = 0;
     unsigned char *meta_conf_signature = NULL;
@@ -284,7 +295,8 @@ int fwup_apply(const char *fw_filename, const char *task_prefix, const char *out
     fctx.subarchive_ptr = subarchive_ptr_callback;
     fctx.progress_mode = progress;
     fctx.report_progress = fwup_apply_report_progress;
-    fctx.last_progress_reported = -1;
+    fctx.last_progress_reported = 0; // fwup_apply_zero_progress is assumed to have been called.
+    fctx.output_fd = output_fd;
 
     // Report 0 progress before doing anything
     fwup_apply_report_progress(&fctx, 0);
@@ -294,30 +306,24 @@ int fwup_apply(const char *fw_filename, const char *task_prefix, const char *out
     fctx.cookie = &pd;
     pd.a = archive_read_new();
 
-    fctx.output_fd = open(output_filename, O_RDWR | O_CREAT, 0644);
-    if (fctx.output_fd < 0)
-        ERR_CLEANUP_MSG("Cannot open output");
-    (void) fcntl(fctx.output_fd, F_SETFD, FD_CLOEXEC);
-
     archive_read_support_format_zip(pd.a);
     int arc = archive_read_open_filename(pd.a, fw_filename, 16384);
     if (arc != ARCHIVE_OK)
-        ERR_CLEANUP_MSG("Cannot open archive: %s", fw_filename);
+        ERR_CLEANUP_MSG("Cannot open archive (%s): %s", fw_filename ? fw_filename : "<stdin>", archive_error_string(pd.a));
 
     struct archive_entry *ae;
     arc = archive_read_next_header(pd.a, &ae);
     if (arc != ARCHIVE_OK)
-        ERR_CLEANUP_MSG("Error reading archive");
+        ERR_CLEANUP_MSG("Error reading archive (%s): %s", fw_filename ? fw_filename : "<stdin>", archive_error_string(pd.a));
 
     if (strcmp(archive_entry_pathname(ae), "meta.conf.ed25519") == 0) {
-        ssize_t total_size = archive_entry_size(ae);
-        if (total_size != crypto_sign_BYTES)
-            ERR_CLEANUP_MSG("Unexpected meta.conf.ed25519 size: %d", total_size);
-
-        meta_conf_signature = (unsigned char *) malloc(total_size);
-        if (archive_read_all_data(pd.a, (char *) meta_conf_signature, total_size) < 0)
+        off_t total_size;
+        if (archive_read_all_data(pd.a, ae, (char **) &meta_conf_signature, crypto_sign_BYTES, &total_size) < 0)
             ERR_CLEANUP_MSG("Error reading meta.conf.ed25519 from archive.\n"
                             "Check for file corruption or libarchive built without zlib support");
+
+        if (total_size != crypto_sign_BYTES)
+            ERR_CLEANUP_MSG("Unexpected meta.conf.ed25519 size: %d", total_size);
 
         arc = archive_read_next_header(pd.a, &ae);
         if (arc != ARCHIVE_OK)
@@ -379,12 +385,16 @@ int fwup_apply(const char *fw_filename, const char *task_prefix, const char *out
     }
 
     // Flush the FATFS code in case it was used.
-    OK_OR_CLEANUP(fatfs_ptr_callback(&fctx, -1, NULL, NULL));
+    OK_OR_CLEANUP(fatfs_ptr_callback(&fctx, -1, NULL));
 
     // Flush a subarchive that's being built.
     OK_OR_CLEANUP(subarchive_ptr_callback(&fctx, "", NULL, NULL));
 
-    // Report 100% to the user.
+    // Close the file before we report 100% just in case that takes some time (Linux)
+    close(fctx.output_fd);
+    fctx.output_fd = -1;
+
+    // Report 100% to the user
     fwup_apply_report_final_progress(&fctx);
 
 cleanup:

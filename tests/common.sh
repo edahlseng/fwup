@@ -3,13 +3,39 @@
 # Common unit test commands
 set -e
 
-TESTS_DIR=$(dirname $(readlink -f $0))
+export LC_ALL=C
+
+# Linux command line tools that may be different on other OSes
+READLINK=readlink
+SED=sed
+
+case "$OSTYPE" in
+    darwin*)
+        [ -e /usr/local/bin/greadlink ] || ( echo "Please run 'brew install coreutils'"; exit 1 )
+        [ -e /usr/local/bin/mdir ] || ( echo "Please run 'brew install mtools'"; exit 1 )
+        [ -e /usr/local/bin/gsed ] || ( echo "Please run 'brew install gnu-sed'"; exit 1 )
+
+        READLINK=/usr/local/bin/greadlink
+        SED=/usr/local/bin/gsed
+        ;;
+    *)
+        ;;
+esac
+
+TESTS_DIR=$(dirname $($READLINK -f $0))
+
+# Default to testing the fwup built in the src directory,
+# but it is possible to define the version of fwup used for
+# the create and apply steps separately.
+FWUP_DEFAULT=$TESTS_DIR/../src/fwup
+if [ -z $FWUP_CREATE ]; then FWUP_CREATE=$FWUP_DEFAULT; fi
+if [ -z $FWUP_APPLY ]; then FWUP_APPLY=$FWUP_DEFAULT; fi
 
 WORK=$TESTS_DIR/work
-FWUP=$TESTS_DIR/../src/fwup
 RESULTS=$WORK/results
 
-[ -e $FWUP ] || ( echo "Build $FWUP first"; exit 1 )
+[ -e $FWUP_CREATE ] || ( echo "Can't find $FWUP_CREATE"; exit 1 )
+[ -e $FWUP_APPLY ] || ( echo "Can't find $FWUP_APPLY"; exit 1 )
 
 CONFIG=$WORK/fwup.conf
 FWFILE=$WORK/fwup.fw
@@ -39,7 +65,28 @@ check_meta_conf() {
     cat $UNZIPDIR/meta.conf | \
         grep -v "^#" | \
         grep -v "^meta-creation-date" | \
+        grep -v "^meta-fwup-version" | \
         grep -v "host-path" \
         > $TRIMMED_META_CONF
     diff -w $EXPECTED_META_CONF $TRIMMED_META_CONF
 }
+
+# Test input files
+
+# These files contain random data so that it is possible to
+# verify that fwup copied things correctly. Previously fwup
+# unit tests used files filled with 1s, and it possible for
+# a test to pass even though the data had been reordered.
+# (This never actually happened to my knowledge.)
+
+TESTFILE_1K=$TESTS_DIR/1K.bin
+TESTFILE_1K_CORRUPT=$TESTS_DIR/1K-corrupt.bin
+TESTFILE_150K=$TESTS_DIR/150K.bin
+
+# Generated test data
+TESTFILE_15M=$TESTS_DIR/15M.bin
+if [ ! -e $TESTFILE_15M ]; then
+    for i in {1..100}; do
+        cat $TESTFILE_150K >> $TESTFILE_15M
+    done
+fi

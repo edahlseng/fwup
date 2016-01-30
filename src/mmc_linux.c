@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+#ifdef __linux__
+
 #include "mmc.h"
 #include "util.h"
 
@@ -28,93 +30,73 @@
 #include <sys/mount.h>
 #include <unistd.h>
 
-#define ONE_KiB  (1024ULL)
-#define ONE_MiB  (1024 * ONE_KiB)
-#define ONE_GiB  (1024 * ONE_MiB)
-
-void mmc_pretty_size(off_t amount, char *out)
-{
-    if (amount >= ONE_GiB)
-        sprintf(out, "%.2f GiB", ((double) amount) / ONE_GiB);
-    else if (amount >= ONE_MiB)
-        sprintf(out, "%.2f MiB", ((double) amount) / ONE_MiB);
-    else if (amount >= ONE_KiB)
-        sprintf(out, "%d KiB", (int) (amount / ONE_KiB));
-    else
-        sprintf(out, "%d bytes", (int) amount);
-}
-
-off_t mmc_device_size(const char *devpath)
+static off_t mmc_device_size(const char *devpath)
 {
     int fd = open(devpath, O_RDONLY);
     if (fd < 0)
         return 0;
 
+    // fstat will not return the mmc size on Linux, so use lseek
+    // instead.
     off_t len = lseek(fd, 0, SEEK_END);
     close(fd);
 
+    // Treat errors and 0-length device sizes the same
     return len < 0 ? 0 : len;
 }
 
-static bool is_mmc_device(const char *devpath)
+static bool is_mmc_device(off_t device_size)
 {
     // Check 1: Path exists and can read length
-    off_t len = mmc_device_size(devpath);
-    if (len == 0)
+    if (device_size == 0)
         return false;
 
     // Check 2: Capacity larger than 32 GiB -> false
-    if (len > (32 * ONE_GiB))
+    if (device_size > (32 * ONE_GiB))
         return false;
-
-    // Certainly there are more checks that we can do
-    // to avoid false memory card detects...
 
     return true;
 }
 
-char *mmc_find_device()
+/**
+ * @brief Scan for SDCards and other removable media
+ * @param devices where to store detected devices and some metadata
+ * @param max_devices the max to return
+ * @return the number of devices found
+ */
+int mmc_scan_for_devices(struct mmc_device *devices, int max_devices)
 {
-    char *possible[64] = {0};
-    size_t possible_ix = 0;
-    char c;
-    size_t i;
+    int device_count = 0;
 
     // Scan memory cards connected via USB. These are /dev/sd_ devices.
     // NOTE: Don't scan /dev/sda, since I don't think this is ever right
     // for any use case.
-    for (c = 'b'; c != 'z'; c++) {
+    for (char c = 'b'; c != 'z'; c++) {
         char devpath[64];
         sprintf(devpath, "/dev/sd%c", c);
 
-        if (is_mmc_device(devpath) && possible_ix < NUM_ELEMENTS(possible))
-            possible[possible_ix++] = strdup(devpath);
+        off_t device_size = mmc_device_size(devpath);
+        if (is_mmc_device(device_size) && device_count < max_devices) {
+            strcpy(devices[device_count].path, devpath);
+            devices[device_count].size = device_size;
+            device_count++;
+        }
     }
 
     // Scan the mmcblk devices
-    for (i = 0; i < 16; i++) {
+    for (int i = 0; i < 16; i++) {
         char devpath[64];
         sprintf(devpath, "/dev/mmcblk%d", (int) i);
 
-        if (is_mmc_device(devpath) && possible_ix < NUM_ELEMENTS(possible))
-            possible[possible_ix++] = strdup(devpath);
+        off_t device_size = mmc_device_size(devpath);
+        if (is_mmc_device(device_size) && device_count < max_devices) {
+            strcpy(devices[device_count].path, devpath);
+            devices[device_count].size = device_size;
+            device_count++;
+        }
     }
 
-    if (possible_ix == 1) {
-        // Success.
-        return possible[0];
-    } else if (possible_ix == 0) {
-        if (getuid() != 0)
-            errx(EXIT_FAILURE, "Memory card couldn't be found automatically.\nTry running as root or specify -? for help");
-        else
-            errx(EXIT_FAILURE, "No memory cards found.");
-    } else {
-        fprintf(stderr, "Too many possible memory cards found: \n");
-        for (i = 0; i < possible_ix; i++)
-            fprintf(stderr, "  %s\n", possible[i]);
-        fprintf(stderr, "Pick one and specify it explicitly on the commandline.\n");
-        exit(EXIT_FAILURE);
-    }
+    return device_count;
 }
 
 static char *unescape_string(const char *input)
@@ -180,7 +162,7 @@ static char *unescape_string(const char *input)
     return result;
 }
 
-void mmc_attempt_umount_all(const char *mmc_device)
+int mmc_umount_all(const char *mmc_device)
 {
     FILE *fp = fopen("/proc/mounts", "r");
     if (!fp)
@@ -188,7 +170,7 @@ void mmc_attempt_umount_all(const char *mmc_device)
 
     char *todo[64] = {0};
     int todo_ix = 0;
-    int i;
+    int ultimate_rc = 0;
 
     char line[512] = {0};
     while (!feof(fp) &&
@@ -212,22 +194,61 @@ void mmc_attempt_umount_all(const char *mmc_device)
     fclose(fp);
 
     int mtab_exists = (access("/etc/mtab", F_OK) != -1);
-    for (i = 0; i < todo_ix; i++) {
+    for (int i = 0; i < todo_ix; i++) {
         if (mtab_exists) {
             // If /etc/mtab, then call umount(8) so that
             // gets updated correctly.
             char cmdline[384];
             sprintf(cmdline, "/bin/umount %s", todo[i]);
             int rc = system(cmdline);
-            if (rc != 0)
-                warnx("%s", cmdline); // don't exit if unmount unsuccessful
+            if (rc != 0) {
+                warnx("%s", cmdline);
+                ultimate_rc = -1;
+            }
         } else {
             // No /etc/mtab, so call the kernel directly.
-            if (umount(todo[i]) < 0)
-                warnx("umount %s", todo[i]); // don't exit if unmount unsuccessful
+#if HAS_UMOUNT
+            if (umount(todo[i]) < 0) {
+                warnx("umount %s", todo[i]);
+                ultimate_rc = -1;
+            }
+#else
+            // If no umount on this platform, warn, but don't
+            // return failure.
+            warnx("umount %s: not supported", todo[i]);
+#endif
         }
     }
 
-    for (i = 0; i < todo_ix; i++)
+    for (int i = 0; i < todo_ix; i++)
         free(todo[i]);
+
+    return ultimate_rc;
 }
+
+int mmc_eject(const char *mmc_device)
+{
+    // Linux doesn't complain if you don't eject
+    (void) mmc_device;
+    return 0;
+}
+
+/**
+ * @brief Open an SDCard/MMC device
+ * @param mmc_path the path
+ * @return a filehandle or <0 on error
+ */
+int mmc_open(const char *mmc_path)
+{
+    return open(mmc_path, O_RDWR);
+}
+
+void mmc_init()
+{
+}
+
+void mmc_finalize()
+{
+}
+
+#endif // __linux__

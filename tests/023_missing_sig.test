@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 
 #
 # Test that installing a firmware that's missing a signature fails
@@ -6,12 +6,9 @@
 
 . ./common.sh
 
-# 1KB of all ones
-cat /dev/zero | tr '\0' '\377' | dd of=$WORK/1K.bin bs=1K count=1 2>/dev/null
-
 cat >$CONFIG <<EOF
 file-resource TEST {
-	host-path = "${WORK}/1K.bin"
+	host-path = "${TESTFILE_1K}"
 }
 
 task complete {
@@ -20,10 +17,10 @@ task complete {
 EOF
 
 # Create new keys
-$FWUP -g
+$FWUP_CREATE -g
 
 # DON'T sign the firmware
-$FWUP -c -f $CONFIG -o $FWFILE
+$FWUP_CREATE -c -f $CONFIG -o $FWFILE
 
 # Check that applying the firmware breaks
 echo Expecting error from apply...

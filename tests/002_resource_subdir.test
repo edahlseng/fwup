@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 
 #
 # Test resources in subdirectories
@@ -6,18 +6,15 @@
 
 . ./common.sh
 
-# 1KB of all ones
-cat /dev/zero | tr '\0' '\377' | dd of=$WORK/1K.bin bs=1K count=1 2>/dev/null
-
 cat >$CONFIG <<EOF
 file-resource subdir/onesubdir {
-	host-path = "${WORK}/1K.bin"
+	host-path = "${TESTFILE_1K}"
 }
 file-resource /rootfile {
-	host-path = "${WORK}/1K.bin"
+	host-path = "${TESTFILE_1K}"
 }
 file-resource subdir1/subdir2/twosubdir {
-        host-path = "${WORK}/1K.bin"
+        host-path = "${TESTFILE_1K}"
 }
 
 task complete {
@@ -31,17 +28,17 @@ cat >$EXPECTED_META_CONF <<EOF
 require-fwup-version="0.0"
 file-resource "subdir/onesubdir" {
   length=1024
-  blake2b-256="4e175e00a248a235bfb03b15b8bed5a1729a8febc24cf00c6caca1765b301d14"
+  blake2b-256="b25c2dfe31707f5572d9a3670d0dcfe5d59ccb010e6aba3b81aad133eb5e378b"
   # sha256=""
 }
 file-resource "/rootfile" {
   length=1024
-  blake2b-256="4e175e00a248a235bfb03b15b8bed5a1729a8febc24cf00c6caca1765b301d14"
+  blake2b-256="b25c2dfe31707f5572d9a3670d0dcfe5d59ccb010e6aba3b81aad133eb5e378b"
   # sha256=""
 }
 file-resource "subdir1/subdir2/twosubdir" {
   length=1024
-  blake2b-256="4e175e00a248a235bfb03b15b8bed5a1729a8febc24cf00c6caca1765b301d14"
+  blake2b-256="b25c2dfe31707f5572d9a3670d0dcfe5d59ccb010e6aba3b81aad133eb5e378b"
   # sha256=""
 }
 task "complete" {
@@ -72,17 +69,17 @@ task "complete" {
 }
 EOF
 
-$FWUP -c -f $CONFIG -o $FWFILE
+$FWUP_CREATE -c -f $CONFIG -o $FWFILE
 
 # Check that the zip file was created as expected
 check_meta_conf
-diff $WORK/1K.bin $UNZIPDIR/data/subdir/onesubdir
-diff $WORK/1K.bin $UNZIPDIR/rootfile
-diff $WORK/1K.bin $UNZIPDIR/data/subdir1/subdir2/twosubdir
+diff $TESTFILE_1K $UNZIPDIR/data/subdir/onesubdir
+diff $TESTFILE_1K $UNZIPDIR/rootfile
+diff $TESTFILE_1K $UNZIPDIR/data/subdir1/subdir2/twosubdir
 
 # Check that applying the firmware does the expected thing
-$FWUP -a -d $IMGFILE -i $FWFILE -t complete
-dd if=$WORK/1K.bin seek=0 of=$WORK/expected.bin
-dd if=$WORK/1K.bin seek=4 of=$WORK/expected.bin
-dd if=$WORK/1K.bin seek=8 of=$WORK/expected.bin
+$FWUP_APPLY -a -d $IMGFILE -i $FWFILE -t complete
+dd if=$TESTFILE_1K seek=0 of=$WORK/expected.bin
+dd if=$TESTFILE_1K seek=4 of=$WORK/expected.bin
+dd if=$TESTFILE_1K seek=8 of=$WORK/expected.bin
 diff $IMGFILE $WORK/expected.bin

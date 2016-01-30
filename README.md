@@ -26,7 +26,7 @@ way. The utility has the following features:
   user before writing anything by default to avoid accidental
   overwrites.
 
-  8. Firmware archive digital signature creation and verification
+  8. Firmware archive digital signature creation and verification (BETA!!)
 
   9. Permissive license (Apache 2.0 License - see end of doc)
 
@@ -56,27 +56,88 @@ give protection against someone pulling power at a bad time. Also, `fwup`'s one 
 over the archive feature means that firmware validation is mostly done on the fly,
 so you'll want to verify the archive first (see the `-V` option).
 
-# Building
+# Installing
 
-IMPORTANT: libconfuse is broke in many distributions. A patch to fix it (the
-environment variable substitution handling) has been integrated into the
-upstream package, but it has not propogated through to the distributions. This
-is partially due to libconfuse not being actively supported.
+If you're running OSX, you're in luck. You can install `fwup` via homebrew right now:
 
-You'll need [libconfuse](http://www.nongnu.org/confuse/) and
-[libarchive](http://libarchive.org/) installed to build. On Ubuntu and Debian,
-you can run:
+    brew install fwup
+
+If you're using another platform or prefer to build it yourself, read on.
+
+# Building Dependencies
+
+On OSX:
+
+    brew install confuse libarchive libsodium
+
+On Ubuntu:
+
+    # libconfuse 2.8 is required but not available in apt
+    curl -L https://github.com/martinh/libconfuse/releases/download/v2.8/confuse-2.8.tar.gz | tar -xz -C /tmp
+    pushd /tmp/confuse-2.8
+    ./configure && make && sudo make install
+    popd
+    rm -rf /tmp/confuse-2.8
 
     sudo apt-get install libarchive-dev libsodium-dev
 
-Download libconfuse as source and build and install it.
+On CentOS 6:
 
-Once that completes, clone or download the `fwup` source code and run the following:
+    # The version of libconfuse available in yum is too old
+    curl -L https://github.com/martinh/libconfuse/releases/download/v2.8/confuse-2.8.tar.gz | tar -xz -C /tmp
+    pushd /tmp/confuse-2.8
+    ./configure && make && sudo make install
+    popd
+    rm -rf /tmp/confuse-2.8
 
+    # The version of libarchive available in yum is too old
+    curl -L http://www.libarchive.org/downloads/libarchive-3.1.2.tar.gz | tar -xz -C /tmp
+    pushd /tmp/libarchive-3.1.2
+    ./configure && make && sudo make install
+    popd
+    rm -rf /tmp/libarchive-3.1.2
+
+    # The version of libsodium available in yum is too old
+    curl -L https://download.libsodium.org/libsodium/releases/libsodium-1.0.8.tar.gz | tar -xz -C /tmp
+    pushd /tmp/libsodium-1.0.8
+    ./configure && make && sudo make install
+    popd
+    rm -rf /tmp/libsodium-1.0.8
+
+    # Assuming all of the libraries were installed to /usr/local/lib
+    sudo ldconfig /usr/local/lib
+
+    # Building fwup from source requires autotools
+    sudo yum install autoconf automake libtool
+
+On CentOS 7:
+
+    # The version of libconfuse available in yum is too old
+    curl -L https://github.com/martinh/libconfuse/releases/download/v2.8/confuse-2.8.tar.gz | tar -xz -C /tmp
+    pushd /tmp/confuse-2.8
+    ./configure && make && sudo make install
+    popd
+    rm -rf /tmp/confuse-2.8
+
+    sudo yum install libarchive-devel libsodium-devel
+
+### Building fwup
+
+On OSX:
+
+    git clone https://github.com/fhunleth/fwup.git
+    cd fwup
     ./autogen.sh
-    ./configure
+    CPPFLAGS="-I/usr/local/include -I/usr/local/opt/libarchive/include" LDFLAGS="-L/usr/local/lib -L/usr/local/opt/libarchive/lib" ./configure
     make
-    make install
+    sudo make install
+
+On Linux:
+
+    git clone https://github.com/fhunleth/fwup.git
+    cd fwup
+    ./autogen.sh
+    ./configure && make && sudo make install
 
 # Regression tests
 
@@ -91,6 +152,10 @@ To run the unit tests, you'll need the mtools package. This isn't used by
 `fwup`, but it's needed to verify that FAT file system operations work.
 
     sudo apt-get install mtools
+
+On OSX, you'll need mtools and a few other packages to run the unit tests:
+
+    brew install coreutils mtools gnu-sed
 
 Then build the project as above and run:
 
@@ -186,6 +251,7 @@ meta-author          | Author or company behind the update
 meta-platform        | Platform that this update runs on (e.g., rpi or bbb)
 meta-architecture    | Platform architectures (e.g., arm)
 meta-creation-date   | Timestamp when the update was created (automatically added)
+meta-fwup-version    | Version of fwup used to create the update (automatically added)
 
 After setting the above options, it is necessary to create scopes for other options. The
 currently available scopes are:
@@ -412,23 +478,39 @@ On the target device, you can retrieve the version by using `-m`. For example:
     meta-architecture = "arm"
     meta-creation-date = "2014-09-07T19:50:57Z"
 
+## How do I get the best performance?
+
+In general, `fwup` is written to write to Flash memory in large blocks so that
+the update can occur quickly. Obviously, reducing the amount that needs to get
+written always helps. Beyond that, most optimizations are platform dependent.
+Linux caches writes so aggressively that writes to Flash memory are nearly as
+fast as possible. OSX, on the other hand, does very little caching, so doing
+things like only working with one FAT filesystem at a time can help. In this
+case, `fwup` only caches writes to one FAT filesystem at a time, so mixing them
+will flush caches. OSX also is very slow to unmount disks, so keep in mind that
+performance can only be so fast on some systems.
+
 # Licenses
 
 This utility contains source code with various licenses. The bulk of the code is
 licensed with the Apache 2.0 license which can be found in the `LICENSE` file.
 
 The FAT filesystem code (FatFs) comes from http://elm-chan.org/fsw/ff/00index_e.html
-and has the following license.
+and has the following license:
 
 ```
 FatFs module is a generic FAT file system module for small embedded systems.
 This is a free software that opened for education, research and commercial
 developments under license policy of following terms.
 
- Copyright (C) 2014, ChaN, all right reserved.
+ Copyright (C) 2015, ChaN, all right reserved.
 
 * The FatFs module is a free software and there is NO WARRANTY.
 * No restriction on use. You can use, modify and redistribute it for
   personal, non-profit or commercial products UNDER YOUR RESPONSIBILITY.
 * Redistributions of source code must retain the above copyright notice.
 ```
+
+On systems without the function open_memstream(), code from
+http://piumarta.com/software/memstream/ is included. It is distributed under
+the MIT license

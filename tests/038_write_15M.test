@@ -1,0 +1,26 @@
+#!/bin/bash
+
+#
+# Test writing a resource to an offset
+#
+
+. ./common.sh
+
+cat >$CONFIG <<EOF
+file-resource subdir/TEST {
+        host-path = "${TESTFILE_15M}"
+}
+
+task complete {
+	on-resource subdir/TEST { raw_write(1) }
+}
+EOF
+
+# Create the firmware file, then "burn it"
+$FWUP_CREATE -c -f $CONFIG -o $FWFILE
+$FWUP_APPLY -a -d $IMGFILE -i $FWFILE -t complete
+
+# The firmware file is equivalent to the following dd call
+# (The conv=sync makes sure that the output is a multiple of 512 bytes)
+dd if=$TESTFILE_15M seek=1 of=$WORK/check.bin conv=sync 2>/dev/null
+diff $WORK/check.bin $IMGFILE

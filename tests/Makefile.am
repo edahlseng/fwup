@@ -29,7 +29,15 @@ TESTS = 001_simple_fw.test \
 	029_5G_offset.test \
 	030_2T_offset.test \
 	031_fat_mkfs_5G.test \
-	032_fat_2T_offset.test
+	032_fat_2T_offset.test \
+	033_bad_host_path.test \
+        034_missing_host_path.test \
+        035_streaming.test \
+        036_streaming_signed_fw.test \
+        037_streaming_bad_sig.test \
+        038_write_15M.test \
+	039_upgrade.test \
+	040_create_mini_fw.test \
+	041_version.test
 
-EXTRA_DIST = $(TESTS) common.sh
-
+EXTRA_DIST = $(TESTS) common.sh 1K.bin 1K-corrupt.bin 150K.bin

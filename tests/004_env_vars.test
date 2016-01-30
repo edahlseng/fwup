@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 
 #
 # Test environment variables embedded in strings in the config files
@@ -10,9 +10,6 @@
 
 . ./common.sh
 
-# 1KB of all ones
-cat /dev/zero | tr '\0' '\377' | dd of=$WORK/1K.bin bs=1K count=1 2>/dev/null
-
 export TEST_ENV_VAR=1K.bin
 
 cat >$CONFIG <<EOF
@@ -22,7 +19,7 @@ meta-product = \${TEST_ENV_VAR}
 # Test substitution in a resource name
 file-resource "\${TEST_ENV_VAR}" {
         # Test substitution in the middle of a string
-	host-path = "${WORK}/\${TEST_ENV_VAR}"
+        host-path = "$TESTS_DIR/\${TEST_ENV_VAR}"
 }
 
 task complete {
@@ -36,7 +33,7 @@ meta-product="${TEST_ENV_VAR}"
 require-fwup-version="0.0"
 file-resource "${TEST_ENV_VAR}" {
   length=1024
-  blake2b-256="4e175e00a248a235bfb03b15b8bed5a1729a8febc24cf00c6caca1765b301d14"
+  blake2b-256="b25c2dfe31707f5572d9a3670d0dcfe5d59ccb010e6aba3b81aad133eb5e378b"
   # sha256=""
 }
 task "complete" {
@@ -59,12 +56,12 @@ task "complete" {
 }
 EOF
 
-$FWUP -c -f $CONFIG -o $FWFILE
+$FWUP_CREATE -c -f $CONFIG -o $FWFILE
 
 # Check that the zip file was created as expected
 check_meta_conf
-diff $WORK/1K.bin $UNZIPDIR/data/${TEST_ENV_VAR}
+diff $TESTFILE_1K $UNZIPDIR/data/${TEST_ENV_VAR}
 
 # Check that applying the firmware does the expected thing
-$FWUP -a -d $IMGFILE -i $FWFILE -t complete
-diff $IMGFILE $WORK/1K.bin
+$FWUP_APPLY -a -d $IMGFILE -i $FWFILE -t complete
+diff $IMGFILE $TESTFILE_1K

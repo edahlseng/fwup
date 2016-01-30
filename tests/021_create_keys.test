@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 
 #
 # Test out progress reporting on a firmware write
@@ -7,7 +7,7 @@
 . ./common.sh
 
 rm -f fwup-key.pub fwup-key.priv
-$FWUP -g
+$FWUP_CREATE -g
 
 if [ `wc -c fwup-key.pub | cut -f 1 -d ' '` -ne 32 ]; then
     echo "fwup-key.pub isn't 32 bytes"

@@ -19,6 +19,7 @@
 #include "fatfs.h"
 #include "mbr.h"
 #include "fwfile.h"
+#include "block_writer.h"
 
 #include <assert.h>
 #include <errno.h>
@@ -215,15 +216,18 @@ int raw_write_run(struct fun_context *fctx)
         ERR_RETURN("raw_write can't find matching file-resource");
     off_t expected_length = cfg_getint(resource, "length");
     char *expected_hash = cfg_getstr(resource, "blake2b-256");
-    if (strlen(expected_hash) != crypto_generichash_BYTES * 2)
+    if (expected_hash && strlen(expected_hash) != crypto_generichash_BYTES * 2)
         ERR_RETURN("raw_write detected blake2b hash with the wrong length");
 
     // Just in case we're raw writing to the FAT partition, make sure
     // that we flush any cached data.
-    fctx->fatfs_ptr(fctx, -1, NULL, NULL);
+    fctx->fatfs_ptr(fctx, -1, NULL);
 
     off_t dest_offset = strtoull(fctx->argv[1], NULL, 0) * 512;
     off_t len_written = 0;
+
+    struct block_writer writer;
+    OK_OR_RETURN(block_writer_init(&writer, fctx->output_fd, 128 * 1024, 9)); // 9 -> 512 byte blocks
 
     crypto_generichash_state hash_state;
     crypto_generichash_init(&hash_state, NULL, 0, crypto_generichash_BYTES);
@@ -241,27 +245,35 @@ int raw_write_run(struct fun_context *fctx)
 
         crypto_generichash_update(&hash_state, (unsigned char*) buffer, len);
 
-        ssize_t written = pwrite(fctx->output_fd, buffer, len, dest_offset + offset);
-        if (written != (ssize_t) len)
-            ERR_RETURN("unexpected error writing to destination");
+        ssize_t written = block_writer_pwrite(&writer, buffer, len, dest_offset + offset);
+        if (written < 0)
+            ERR_RETURN("raw_write couldn't write %d bytes to offset %lld", len, dest_offset + offset);
 
-        len_written += len;
+        len_written += written;
         fctx->report_progress(fctx, len);
     }
+
+    ssize_t lastwritten = block_writer_free(&writer);
+    if (lastwritten < 0)
+        ERR_RETURN("raw_write couldn't write final bytes");
+    len_written += lastwritten;
 
     if (len_written != expected_length) {
         if (len_written == 0)
             ERR_RETURN("raw_write didn't write anything. Was it called twice in one on-resource?");
         else
-            ERR_RETURN("raw_write didn't write the expected amount");
+            ERR_RETURN("raw_write wrote %lld bytes, but should have written %lld", len_written, expected_length);
     }
 
-    unsigned char hash[crypto_generichash_BYTES];
-    crypto_generichash_final(&hash_state, hash, sizeof(hash));
-    char hash_str[sizeof(hash) * 2 + 1];
-    bytes_to_hex(hash, hash_str, sizeof(hash));
-    if (memcmp(hash_str, expected_hash, sizeof(hash_str)) != 0)
-        ERR_RETURN("raw_write detected blake2b digest mismatch");
+    // Verify hash if present.
+    if (expected_hash) {
+        unsigned char hash[crypto_generichash_BYTES];
+        crypto_generichash_final(&hash_state, hash, sizeof(hash));
+        char hash_str[sizeof(hash) * 2 + 1];
+        bytes_to_hex(hash, hash_str, sizeof(hash));
+        if (memcmp(hash_str, expected_hash, sizeof(hash_str)) != 0)
+            ERR_RETURN("raw_write detected blake2b digest mismatch");
+    }
 
     return 0;
 }
@@ -283,12 +295,11 @@ int fat_mkfs_compute_progress(struct fun_context *fctx)
 }
 int fat_mkfs_run(struct fun_context *fctx)
 {
-    FILE *fatfp;
-    off_t offset;
-    if (fctx->fatfs_ptr(fctx, strtoull(fctx->argv[1], NULL, 0), &fatfp, &offset) < 0)
+    struct fat_cache *fc;
+    if (fctx->fatfs_ptr(fctx, strtoull(fctx->argv[1], NULL, 0), &fc) < 0)
         return -1;
 
-    if (fatfs_mkfs(fatfp, offset, strtoul(fctx->argv[2], NULL, 0)) < 0)
+    if (fatfs_mkfs(fc, strtoul(fctx->argv[2], NULL, 0)) < 0)
         return -1;
 
     fctx->report_progress(fctx, 1);
@@ -327,12 +338,11 @@ int fat_attrib_compute_progress(struct fun_context *fctx)
 }
 int fat_attrib_run(struct fun_context *fctx)
 {
-    FILE *fatfp;
-    off_t offset;
-    if (fctx->fatfs_ptr(fctx, strtoull(fctx->argv[1], NULL, 0), &fatfp, &offset) < 0)
+    struct fat_cache *fc;
+    if (fctx->fatfs_ptr(fctx, strtoull(fctx->argv[1], NULL, 0), &fc) < 0)
         return -1;
 
-    if (fatfs_attrib(fatfp, offset, fctx->argv[2], fctx->argv[3]) < 0)
+    if (fatfs_attrib(fc, fctx->argv[2], fctx->argv[3]) < 0)
         return 1;
 
     fctx->report_progress(fctx, 1);
@@ -375,17 +385,16 @@ int fat_write_run(struct fun_context *fctx)
         ERR_RETURN("fat_write can't find matching file-resource");
     off_t expected_length = cfg_getint(resource, "length");
     char *expected_hash = cfg_getstr(resource, "blake2b-256");
-    if (strlen(expected_hash) != crypto_generichash_BYTES * 2)
+    if (expected_hash && strlen(expected_hash) != crypto_generichash_BYTES * 2)
         ERR_RETURN("fat_write detected blake2b hash with the wrong length");
 
-    FILE *fatfp;
-    off_t fatfp_offset;
+    struct fat_cache *fc;
     off_t len_written = 0;
-    if (fctx->fatfs_ptr(fctx, strtoull(fctx->argv[1], NULL, 0), &fatfp, &fatfp_offset) < 0)
+    if (fctx->fatfs_ptr(fctx, strtoull(fctx->argv[1], NULL, 0), &fc) < 0)
         return -1;
 
     // enforce truncation semantics if the file exists
-    fatfs_rm(fatfp, fatfp_offset, fctx->argv[2]);
+    fatfs_rm(fc, fctx->argv[2]);
 
     crypto_generichash_state hash_state;
     crypto_generichash_init(&hash_state, NULL, 0, crypto_generichash_BYTES);
@@ -403,7 +412,7 @@ int fat_write_run(struct fun_context *fctx)
 
         crypto_generichash_update(&hash_state, (unsigned char*) buffer, len);
 
-        if (fatfs_pwrite(fatfp, fatfp_offset, fctx->argv[2], (int) offset, buffer, len) < 0)
+        if (fatfs_pwrite(fc, fctx->argv[2], (int) offset, buffer, len) < 0)
             return -1;
 
         len_written += len;
@@ -417,12 +426,15 @@ int fat_write_run(struct fun_context *fctx)
             ERR_RETURN("fat_write didn't write the expected amount");
     }
 
-    unsigned char hash[crypto_generichash_BYTES];
-    crypto_generichash_final(&hash_state, hash, sizeof(hash));
-    char hash_str[sizeof(hash) * 2 + 1];
-    bytes_to_hex(hash, hash_str, sizeof(hash));
-    if (memcmp(hash_str, expected_hash, sizeof(hash_str)) != 0)
-        ERR_RETURN("fat_write detected blake2b hash mismatch");
+    // If no hash, then skip check.
+    if (expected_hash) {
+        unsigned char hash[crypto_generichash_BYTES];
+        crypto_generichash_final(&hash_state, hash, sizeof(hash));
+        char hash_str[sizeof(hash) * 2 + 1];
+        bytes_to_hex(hash, hash_str, sizeof(hash));
+        if (memcmp(hash_str, expected_hash, sizeof(hash_str)) != 0)
+            ERR_RETURN("fat_write detected blake2b hash mismatch");
+    }
 
     return 0;
 }
@@ -442,13 +454,12 @@ int fat_mv_compute_progress(struct fun_context *fctx)
 }
 int fat_mv_run(struct fun_context *fctx)
 {
-    FILE *fatfp;
-    off_t fatfp_offset;
-    if (fctx->fatfs_ptr(fctx, strtoull(fctx->argv[1], NULL, 0), &fatfp, &fatfp_offset) < 0)
+    struct fat_cache *fc;
+    if (fctx->fatfs_ptr(fctx, strtoull(fctx->argv[1], NULL, 0), &fc) < 0)
         return -1;
 
     // TODO: Ignore the error code here??
-    fatfs_mv(fatfp, fatfp_offset, fctx->argv[2], fctx->argv[3]);
+    fatfs_mv(fc, fctx->argv[2], fctx->argv[3]);
 
     fctx->report_progress(fctx, 1);
     return 0;
@@ -470,13 +481,12 @@ int fat_rm_compute_progress(struct fun_context *fctx)
 }
 int fat_rm_run(struct fun_context *fctx)
 {
-    FILE *fatfp;
-    off_t fatfp_offset;
-    if (fctx->fatfs_ptr(fctx, strtoull(fctx->argv[1], NULL, 0), &fatfp, &fatfp_offset) < 0)
+    struct fat_cache *fc;
+    if (fctx->fatfs_ptr(fctx, strtoull(fctx->argv[1], NULL, 0), &fc) < 0)
         return -1;
 
     // TODO: Ignore the error code here??
-    fatfs_rm(fatfp, fatfp_offset, fctx->argv[2]);
+    fatfs_rm(fc, fctx->argv[2]);
 
     fctx->report_progress(fctx, 1);
     return 0;
@@ -498,13 +508,12 @@ int fat_cp_compute_progress(struct fun_context *fctx)
 }
 int fat_cp_run(struct fun_context *fctx)
 {
-    FILE *fatfp;
-    off_t fatfp_offset;
-    if (fctx->fatfs_ptr(fctx, strtoull(fctx->argv[1], NULL, 0), &fatfp, &fatfp_offset) < 0)
+    struct fat_cache *fc;
+    if (fctx->fatfs_ptr(fctx, strtoull(fctx->argv[1], NULL, 0), &fc) < 0)
         return -1;
 
     // TODO: Ignore the error code here??
-    fatfs_cp(fatfp, fatfp_offset, fctx->argv[2], fctx->argv[3]);
+    fatfs_cp(fc, fctx->argv[2], fctx->argv[3]);
 
     fctx->report_progress(fctx, 1);
     return 0;
@@ -526,13 +535,12 @@ int fat_mkdir_compute_progress(struct fun_context *fctx)
 }
 int fat_mkdir_run(struct fun_context *fctx)
 {
-    FILE *fatfp;
-    off_t fatfp_offset;
-    if (fctx->fatfs_ptr(fctx, strtoull(fctx->argv[1], NULL, 0), &fatfp, &fatfp_offset) < 0)
+    struct fat_cache *fc;
+    if (fctx->fatfs_ptr(fctx, strtoull(fctx->argv[1], NULL, 0), &fc) < 0)
         return -1;
 
     // TODO: Ignore the error code here??
-    fatfs_mkdir(fatfp, fatfp_offset, fctx->argv[2]);
+    fatfs_mkdir(fc, fctx->argv[2]);
 
     fctx->report_progress(fctx, 1);
     return 0;
@@ -554,13 +562,12 @@ int fat_setlabel_compute_progress(struct fun_context *fctx)
 }
 int fat_setlabel_run(struct fun_context *fctx)
 {
-    FILE *fatfp;
-    off_t fatfp_offset;
-    if (fctx->fatfs_ptr(fctx, strtoull(fctx->argv[1], NULL, 0), &fatfp, &fatfp_offset) < 0)
+    struct fat_cache *fc;
+    if (fctx->fatfs_ptr(fctx, strtoull(fctx->argv[1], NULL, 0), &fc) < 0)
         return -1;
 
     // TODO: Ignore the error code here??
-    fatfs_setlabel(fatfp, fatfp_offset, fctx->argv[2]);
+    fatfs_setlabel(fc, fctx->argv[2]);
 
     return 0;
 }

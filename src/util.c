@@ -16,11 +16,14 @@
 #define _GNU_SOURCE // for vasprintf
 #include "util.h"
 
+#include <errno.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+
+#include <sys/stat.h>
 
 char *strptime(const char *s, const char *format, struct tm *tm);
 
@@ -197,4 +200,29 @@ int archive_filename_to_resource(const char *name, char *result, size_t maxlengt
     }
 
     return 0;
+}
+
+/*
+ * Return true if the file is already a regular
+ * file or it will be one if it is opened without
+ * any special flags.
+ */
+bool will_be_regular_file(const char *path)
+{
+    struct stat st;
+    int rc = stat(path, &st);
+    return (rc == 0 && st.st_mode & S_IFREG) ||
+           (rc < 0 && errno == ENOENT);
+}
+
+void format_pretty_size(off_t amount, char *out)
+{
+    if (amount >= ONE_GiB)
+        sprintf(out, "%.2f GiB", ((double) amount) / ONE_GiB);
+    else if (amount >= ONE_MiB)
+        sprintf(out, "%.2f MiB", ((double) amount) / ONE_MiB);
+    else if (amount >= ONE_KiB)
+        sprintf(out, "%d KiB", (int) (amount / ONE_KiB));
+    else
+        sprintf(out, "%d bytes", (int) amount);
 }
